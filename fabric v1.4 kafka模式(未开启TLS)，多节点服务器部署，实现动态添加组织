@@ -1,0 +1,2316 @@
+fabric v1.4 kafka模式(未开启TLS)，多节点服务器部署，实现动态添加组织
+
+一、环境准备
+    这里采用阿里云ECS主机(2核4G，生产环境按实际环境提升配置)
+    必须指定hostsname
+    fabric官网 github https://github.com/hyperledger/fabric
+    centos7 x64
+
+1.所有节点服务器指定如下hosts(含后续新增组织，也必须同步所有hosts)
+
+172.31.1.89 zookeeper0
+172.31.1.90 zookeeper1
+172.31.1.91 zookeeper2
+
+172.31.1.89 kafka0
+172.31.1.90 kafka1
+172.31.1.91 kafka2
+172.31.1.92 kafka3
+
+172.31.1.89 orderer0.example.com
+172.31.1.90 orderer1.example.com
+172.31.1.91 orderer2.example.com
+
+172.31.1.89 peer0.org1.example.com
+172.31.1.90 peer1.org1.example.com
+172.31.1.91 peer0.org2.example.com
+172.31.1.92 peer1.org2.example.com
+
+;;;##后续模拟新增org3组织-备用
+172.31.1.101 peer0.org2.example.com
+172.31.1.102 peer1.org2.example.com
+
+2.环境初始(所有节点服务均部署)
+  #####注意！注意！注意！说三遍########
+  阿里云ECS 注释(options timeout:2 attempts:3 rotate single-request-reopen)，不然会报错
+  # vim /etc/resolv.conf
+  ;options timeout:2 attempts:3 rotate single-request-reopen
+  nameserver 100.100.2.136
+  nameserver 100.100.2.138
+  #######注意！注意！注意！说三遍##########
+
+  1)关闭防火墙（或开放端口）、selinux
+  systemctl disable firewalld.service
+  systemctl stop firewalld.service
+  2)安装配置docker(17.06.2-ce or later)
+        # step 1: 安装必要的一些系统工具
+        yum install -y yum-utils device-mapper-persistent-data lvm2
+        # Step 2: 添加软件源信息
+        yum-config-manager --add-repo http://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+        # Step 3: 更新并安装 Docker-CE
+        yum makecache fast
+        yum list docker-ce --showduplicates | sort -r
+        #安装指定docker 版本 
+        yum install docker-ce-17.12.0.ce-1.el7.centos
+        # Step 4: 开启Docker服务
+        service docker start
+        systemctl enable docker.service
+  3)docker-compose(1.14.0 or later)
+        #下载docker-compose
+        # curl -L "https://github.com/docker/compose/releases/download/1.24.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        #为docker-compose配置执行权限
+        #chmod +x /usr/local/bin/docker-compose
+        #检查是否安装成功
+        #docker-compose -v
+  4)git、go(version 1.10.x)
+        #下载安装git
+        #yum install git -y
+
+        #go安装下载，预先创建/opt/soft/(后续存配置文件)、/opt/gopath(存放fabric源代码)
+        #mkdir -p /opt/gopath
+        #mkdir /opt/soft/ 
+        # 国外地址
+        #wget https://storage.googleapis.com/golang/go1.10.linux-amd64.tar.gz
+        # 国内地址
+        #wget https://studygolang.com/dl/golang/go1.10.linux-amd64.tar.gz
+        # 解压
+        #tar -C /usr/local/ -xzvf go1.10.linux-amd64.tar.gz
+        # 配置环境变量
+        #vi /etc/profile
+                添加如下
+                # go env
+                export PATH=$PATH:/usr/local/go/bin
+                export GOPATH=/opt/gopath
+
+        # 生效配置
+        source /etc/profile
+        # 查看配置
+        go version
+
+  5)域名ip映射(/etc/hosts),如开篇设置
+  
+二、生成配置信息
+  ####以下操作均在第一节点服务器 172.31.1.89
+  1.下载Hyperledger Fabric 源码   
+  # 下载 Fabric 源码, 源码中 import 的路径为github.com/hyperledger/fabric ,所以我们要按照这个路径
+  #mkdir -p /opt/gopath/src/github.com/hyperledger
+  #cd /opt/gopath/src/github.com/hyperledger
+  #git clone https://github.com/hyperledger/fabric
+  [root@xxxx fabric]# pwd
+  /opt/gopath/src/github.com/hyperledger/fabric
+  [root@xxxxx fabric]# ll
+  total 1412
+  .................省略部分
+  drwxr-xr-x  6 root root   4096 Aug 25 02:06 msp
+  drwxr-xr-x  6 root root   4096 Aug 25 02:06 orderer
+  drwxr-xr-x 13 root root   4096 Aug 29 12:48 peer
+  drwxr-xr-x 14 root root   4096 Aug 25 02:06 protos
+  -rw-r--r--  1 root root   7303 Aug 25 02:06 README.md
+  drwxr-xr-x  3 root root   4096 Aug 25 02:06 release
+  drwxr-xr-x  2 root root   4096 Aug 25 02:06 release_notes
+  drwxr-xr-x  3 root root   4096 Aug 25 02:06 sampleconfig
+  drwxr-xr-x  2 root root   4096 Aug 25 02:06 scripts
+  -rw-r--r--  1 root root    316 Aug 25 02:06 settings.gradle
+  -rw-r--r--  1 root root   3816 Aug 25 02:06 testingInfo.rst
+  -rw-r--r--  1 root root 438053 Aug 25 02:06 test-pyramid.png
+  drwxr-xr-x  8 root root   4096 Aug 25 02:06 token
+  -rw-r--r--  1 root root    495 Aug 25 02:06 tox.ini
+  drwxr-xr-x  2 root root   4096 Aug 25 02:06 unit-test
+  drwxr-xr-x  9 root root   4096 Aug 25 02:06 vendor
+
+  
+  2.生成 Hyperledger Fabric 证书，证书生成只需要生成一次
+  # 下载官方证书生成软件工具(均为二进制文件)
+
+  #进入目录
+  #cd /opt/soft
+
+  #工具为1.4版本：wget https://nexus.hyperledger.org/content/repositories/releases/org/hyperledger/fabric/hyperledger-fabric/linux-amd64-1.4.0/hyperledger-fabric-linux-amd64-1.4.0.tar.gz
+  #解压
+   tar zxvf hyperledger-fabric-linux-amd64-1.4.0.tar.gz
+
+  # 解压后是 一个 bin 与 一个 config 目录
+  [root@xxxx bin]# tree 
+        ├── configtxgen
+        ├── configtxlator
+        ├── cryptogen
+        ├── get-docker-images.sh
+        ├── orderer
+        └── peer
+        
+  # 设置环境变量
+  vi /etc/profile
+
+  # fabric env
+  export PATH=$PATH:/opt/soft/bin
+
+  # 使文件生效
+  source /etc/profile
+
+  
+  # 从git(release-1.3版本)下载，或者从其他途径下载默认 configtx.yaml 、crypto-config.yaml ，并上传至/opt/soft目录，待修改
+   配置文件在目录下 https://github.com/hyperledger/fabric/tree/release-1.3/examples/e2e_cli 
+
+  ###编辑修改crypto-config.yaml 如下(主要修改组织区域与增加orderer)：
+# Copyright IBM Corp. All Rights Reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+# ---------------------------------------------------------------------------
+# "OrdererOrgs" - Definition of organizations managing orderer nodes
+# ---------------------------------------------------------------------------
+OrdererOrgs:
+  # ---------------------------------------------------------------------------
+  # Orderer
+  # ---------------------------------------------------------------------------
+  - Name: Orderer
+    Domain: example.com
+    CA:
+        Country: CN
+        Province: GuangDong
+        Locality: ShenZhen
+    # ---------------------------------------------------------------------------
+    # "Specs" - See PeerOrgs below for complete description
+    # ---------------------------------------------------------------------------
+    Specs:
+      - Hostname: orderer0
+      - Hostname: orderer1
+      - Hostname: orderer2
+# ---------------------------------------------------------------------------
+# "PeerOrgs" - Definition of organizations managing peer nodes
+# ---------------------------------------------------------------------------
+PeerOrgs:
+  # ---------------------------------------------------------------------------
+  # Org1
+  # ---------------------------------------------------------------------------
+  - Name: Org1
+    Domain: org1.example.com
+    EnableNodeOUs: true
+    CA:
+        Country: CN
+        Province: GuangDong
+        Locality: ShenZhen
+    # ---------------------------------------------------------------------------
+    # "Specs"
+    # ---------------------------------------------------------------------------
+    # Uncomment this section to enable the explicit definition of hosts in your
+    # configuration.  Most users will want to use Template, below
+    #
+    # Specs is an array of Spec entries.  Each Spec entry consists of two fields:
+    #   - Hostname:   (Required) The desired hostname, sans the domain.
+    #   - CommonName: (Optional) Specifies the template or explicit override for
+    #                 the CN.  By default, this is the template:
+    #
+    #                              "{{.Hostname}}.{{.Domain}}"
+    #
+    #                 which obtains its values from the Spec.Hostname and
+    #                 Org.Domain, respectively.
+    # ---------------------------------------------------------------------------
+    # Specs:
+    #   - Hostname: foo # implicitly "foo.org1.example.com"
+    #     CommonName: foo27.org5.example.com # overrides Hostname-based FQDN set above
+    #   - Hostname: bar
+    #   - Hostname: baz
+    # ---------------------------------------------------------------------------
+    # "Template"
+    # ---------------------------------------------------------------------------
+    # Allows for the definition of 1 or more hosts that are created sequentially
+    # from a template. By default, this looks like "peer%d" from 0 to Count-1.
+    # You may override the number of nodes (Count), the starting index (Start)
+    # or the template used to construct the name (Hostname).
+    #
+    # Note: Template and Specs are not mutually exclusive.  You may define both
+    # sections and the aggregate nodes will be created for you.  Take care with
+    # name collisions
+    # ---------------------------------------------------------------------------
+    Template:
+      Count: 2
+      # Start: 5
+      # Hostname: {{.Prefix}}{{.Index}} # default
+    # ---------------------------------------------------------------------------
+    # "Users"
+    # ---------------------------------------------------------------------------
+    # Count: The number of user accounts _in addition_ to Admin
+    # ---------------------------------------------------------------------------
+    Users:
+      Count: 1
+  # ---------------------------------------------------------------------------
+  # Org2: See "Org1" for full specification
+  # ---------------------------------------------------------------------------
+  - Name: Org2
+    Domain: org2.example.com
+    EnableNodeOUs: true
+    CA:
+        Country: CN
+        Province: GuangDong
+        Locality: ShenZhen
+    Template:
+      Count: 2
+    Users:
+      Count: 1
+  
+  #用cryptogen 工具执行生成相应的证书
+  [root@xxxx soft]# cryptogen generate --config=./crypto-config.yaml
+  org1.example.com
+  org2.example.com
+  
+  # 生成一个 crypto-config 证书目录
+  # 可用 tree crypto-config 查看
+ 
+  #生成 Hyperledger Fabric 创世区块
+  #/opt/soft目录下创建channel-artifacts，存放生成块信息
+  [root@xxxx soft]# mkdir -p /opt/soft/channel-artifacts
+  # 编辑修改configtx.yaml(orderer 多节点 peer 多节点),如下：
+
+
+# Copyright IBM Corp. All Rights Reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+---
+################################################################################
+#
+#   Section: Organizations
+#
+#   - This section defines the different organizational identities which will
+#   be referenced later in the configuration.
+#
+################################################################################
+Organizations:
+
+    # SampleOrg defines an MSP using the sampleconfig.  It should never be used
+    # in production but may be used as a template for other definitions
+    - &OrdererOrg
+        # DefaultOrg defines the organization which is used in the sampleconfig
+        # of the fabric.git development environment
+        Name: OrdererOrg
+
+        # ID to load the MSP definition as
+        ID: OrdererMSP
+
+        # MSPDir is the filesystem path which contains the MSP configuration
+        MSPDir: crypto-config/ordererOrganizations/example.com/msp
+
+        # Policies defines the set of policies at this level of the config tree
+        # For organization policies, their canonical path is usually
+        #   /Channel/<Application|Orderer>/<OrgName>/<PolicyName>
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('OrdererMSP.member')"
+            Writers:
+                Type: Signature
+                Rule: "OR('OrdererMSP.member')"
+            Admins:
+                Type: Signature
+                Rule: "OR('OrdererMSP.admin')"
+
+    - &Org1
+        # DefaultOrg defines the organization which is used in the sampleconfig
+        # of the fabric.git development environment
+        Name: Org1MSP
+
+        # ID to load the MSP definition as
+        ID: Org1MSP
+
+        MSPDir: crypto-config/peerOrganizations/org1.example.com/msp
+
+        # Policies defines the set of policies at this level of the config tree
+        # For organization policies, their canonical path is usually
+        #   /Channel/<Application|Orderer>/<OrgName>/<PolicyName>
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('Org1MSP.admin', 'Org1MSP.peer', 'Org1MSP.client')"
+            Writers:
+                Type: Signature
+                Rule: "OR('Org1MSP.admin', 'Org1MSP.client')"
+            Admins:
+                Type: Signature
+                Rule: "OR('Org1MSP.admin')"
+
+        AnchorPeers:
+            # AnchorPeers defines the location of peers which can be used
+            # for cross org gossip communication.  Note, this value is only
+            # encoded in the genesis block in the Application section context
+            - Host: peer0.org1.example.com
+              Port: 7051
+
+    - &Org2
+        # DefaultOrg defines the organization which is used in the sampleconfig
+        # of the fabric.git development environment
+        Name: Org2MSP
+
+        # ID to load the MSP definition as
+        ID: Org2MSP
+
+        MSPDir: crypto-config/peerOrganizations/org2.example.com/msp
+
+        # Policies defines the set of policies at this level of the config tree
+        # For organization policies, their canonical path is usually
+        #   /Channel/<Application|Orderer>/<OrgName>/<PolicyName>
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('Org2MSP.admin', 'Org2MSP.peer', 'Org2MSP.client')"
+            Writers:
+                Type: Signature
+                Rule: "OR('Org2MSP.admin', 'Org2MSP.client')"
+            Admins:
+                Type: Signature
+                Rule: "OR('Org2MSP.admin')"
+
+        AnchorPeers:
+            # AnchorPeers defines the location of peers which can be used
+            # for cross org gossip communication.  Note, this value is only
+            # encoded in the genesis block in the Application section context
+            - Host: peer0.org2.example.com
+              Port: 7051
+
+    
+################################################################################
+#
+#   SECTION: Capabilities
+#
+#   - This section defines the capabilities of fabric network. This is a new
+#   concept as of v1.1.0 and should not be utilized in mixed networks with
+#   v1.0.x peers and orderers.  Capabilities define features which must be
+#   present in a fabric binary for that binary to safely participate in the
+#   fabric network.  For instance, if a new MSP type is added, newer binaries
+#   might recognize and validate the signatures from this type, while older
+#   binaries without this support would be unable to validate those
+#   transactions.  This could lead to different versions of the fabric binaries
+#   having different world states.  Instead, defining a capability for a channel
+#   informs those binaries without this capability that they must cease
+#   processing transactions until they have been upgraded.  For v1.0.x if any
+#   capabilities are defined (including a map with all capabilities turned off)
+#   then the v1.0.x peer will deliberately crash.
+#
+################################################################################
+Capabilities:
+    # Channel capabilities apply to both the orderers and the peers and must be
+    # supported by both.
+    # Set the value of the capability to true to require it.
+    Channel: &ChannelCapabilities
+        # V1.3 for Channel is a catchall flag for behavior which has been
+        # determined to be desired for all orderers and peers running at the v1.3.x
+        # level, but which would be incompatible with orderers and peers from
+        # prior releases.
+        # Prior to enabling V1.3 channel capabilities, ensure that all
+        # orderers and peers on a channel are at v1.3.0 or later.
+        V1_3: true
+
+    # Orderer capabilities apply only to the orderers, and may be safely
+    # used with prior release peers.
+    # Set the value of the capability to true to require it.
+    Orderer: &OrdererCapabilities
+        # V1.1 for Orderer is a catchall flag for behavior which has been
+        # determined to be desired for all orderers running at the v1.1.x
+        # level, but which would be incompatible with orderers from prior releases.
+        # Prior to enabling V1.1 orderer capabilities, ensure that all
+        # orderers on a channel are at v1.1.0 or later.
+        V1_1: true
+
+    # Application capabilities apply only to the peer network, and may be safely
+    # used with prior release orderers.
+    # Set the value of the capability to true to require it.
+    Application: &ApplicationCapabilities
+        # V1.3 for Application enables the new non-backwards compatible
+        # features and fixes of fabric v1.3.
+        V1_3: true
+        # V1.2 for Application enables the new non-backwards compatible
+        # features and fixes of fabric v1.2 (note, this need not be set if
+        # later version capabilities are set)
+        V1_2: false
+        # V1.1 for Application enables the new non-backwards compatible
+        # features and fixes of fabric v1.1 (note, this need not be set if
+        # later version capabilities are set).
+        V1_1: false
+
+################################################################################
+#
+#   SECTION: Application
+#
+#   - This section defines the values to encode into a config transaction or
+#   genesis block for application related parameters
+#
+################################################################################
+Application: &ApplicationDefaults
+
+    # Organizations is the list of orgs which are defined as participants on
+    # the application side of the network
+    Organizations:
+
+    # Policies defines the set of policies at this level of the config tree
+    # For Application policies, their canonical path is
+    #   /Channel/Application/<PolicyName>
+    Policies:
+        Readers:
+            Type: ImplicitMeta
+            Rule: "ANY Readers"
+        Writers:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+        Admins:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Admins"
+
+    # Capabilities describes the application level capabilities, see the
+    # dedicated Capabilities section elsewhere in this file for a full
+    # description
+    Capabilities:
+        <<: *ApplicationCapabilities
+
+################################################################################
+#
+#   SECTION: Orderer
+#
+#   - This section defines the values to encode into a config transaction or
+#   genesis block for orderer related parameters
+#
+################################################################################
+Orderer: &OrdererDefaults
+
+    # Orderer Type: The orderer implementation to start
+    # Available types are "solo" and "kafka"
+    OrdererType: kafka
+
+    Addresses:
+        - orderer0.example.com:7050
+        - orderer1.example.com:7050
+        - orderer2.example.com:7050
+
+    # Batch Timeout: The amount of time to wait before creating a batch
+    BatchTimeout: 2s
+
+    # Batch Size: Controls the number of messages batched into a block
+    BatchSize:
+
+        # Max Message Count: The maximum number of messages to permit in a batch
+        MaxMessageCount: 10
+
+        # Absolute Max Bytes: The absolute maximum number of bytes allowed for
+        # the serialized messages in a batch.
+        AbsoluteMaxBytes: 98 MB
+
+        # Preferred Max Bytes: The preferred maximum number of bytes allowed for
+        # the serialized messages in a batch. A message larger than the preferred
+        # max bytes will result in a batch larger than preferred max bytes.
+        PreferredMaxBytes: 512 KB
+
+    Kafka:
+        # Brokers: A list of Kafka brokers to which the orderer connects. Edit
+        # this list to identify the brokers of the ordering service.
+        # NOTE: Use IP:port notation.
+        Brokers:
+            - kafka0:9092
+            - kafka1:9092
+            - kafka2:9092
+            - kafka3:9092
+
+    # Organizations is the list of orgs which are defined as participants on
+    # the orderer side of the network
+    Organizations:
+
+    # Policies defines the set of policies at this level of the config tree
+    # For Orderer policies, their canonical path is
+    #   /Channel/Orderer/<PolicyName>
+    Policies:
+        Readers:
+            Type: ImplicitMeta
+            Rule: "ANY Readers"
+        Writers:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+        Admins:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Admins"
+        # BlockValidation specifies what signatures must be included in the block
+        # from the orderer for the peer to validate it.
+        BlockValidation:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+
+    # Capabilities describes the orderer level capabilities, see the
+    # dedicated Capabilities section elsewhere in this file for a full
+    # description
+    Capabilities:
+        <<: *OrdererCapabilities
+
+################################################################################
+#
+#   CHANNEL
+#
+#   This section defines the values to encode into a config transaction or
+#   genesis block for channel related parameters.
+#
+################################################################################
+Channel: &ChannelDefaults
+    # Policies defines the set of policies at this level of the config tree
+    # For Channel policies, their canonical path is
+    #   /Channel/<PolicyName>
+    Policies:
+        # Who may invoke the 'Deliver' API
+        Readers:
+            Type: ImplicitMeta
+            Rule: "ANY Readers"
+        # Who may invoke the 'Broadcast' API
+        Writers:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+        # By default, who may modify elements at this config level
+        Admins:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Admins"
+
+
+    # Capabilities describes the channel level capabilities, see the
+    # dedicated Capabilities section elsewhere in this file for a full
+    # description
+    Capabilities:
+        <<: *ChannelCapabilities
+
+################################################################################
+#
+#   Profile
+#
+#   - Different configuration profiles may be encoded here to be specified
+#   as parameters to the configtxgen tool
+#
+################################################################################
+Profiles:
+
+    TwoOrgsOrdererGenesis:
+        <<: *ChannelDefaults
+        Orderer:
+            <<: *OrdererDefaults
+            Organizations:
+                - *OrdererOrg
+        Consortiums:
+            SampleConsortium:
+                Organizations:
+                    - *Org1
+                    - *Org2
+
+    TwoOrgsChannel:
+        Consortium: SampleConsortium
+        Application:
+            <<: *ApplicationDefaults
+            Organizations:
+                - *Org1
+                - *Org2
+
+
+  #使用configtxgen工具，创建 创世区块  TwoOrgsOrdererGenesis 名称为 configtx.yaml 中 Profiles 字段下定义的
+  #[root@xxxx soft]#configtxgen -profile TwoOrgsOrdererGenesis -outputBlock ./channel-artifacts/genesis.block
+2019-08-25 02:25:31.256 CST [common.tools.configtxgen] main -> WARN 001 Omitting the channel ID for configtxgen for output operations is deprecated.  Explicitly passing the channel ID will be required in the future, defaulting to 'testchainid'.
+2019-08-25 02:25:31.256 CST [common.tools.configtxgen] main -> INFO 002 Loading configuration
+2019-08-25 02:25:31.268 CST [common.tools.configtxgen.localconfig] completeInitialization -> INFO 003 orderer type: kafka
+2019-08-25 02:25:31.268 CST [common.tools.configtxgen.localconfig] Load -> INFO 004 Loaded configuration: /opt/soft/configtx.yaml
+2019-08-25 02:25:31.279 CST [common.tools.configtxgen.localconfig] completeInitialization -> INFO 005 orderer type: kafka
+2019-08-25 02:25:31.279 CST [common.tools.configtxgen.localconfig] LoadTopLevel -> INFO 006 Loaded configuration: /opt/soft/configtx.yaml
+2019-08-25 02:25:31.280 CST [common.tools.configtxgen] doOutputBlock -> INFO 007 Generating genesis block
+2019-08-25 02:25:31.281 CST [common.tools.configtxgen] doOutputBlock -> INFO 008 Writing genesis block
+
+# 下面来生成一个 peer 服务 中使用的 tx 文件 TwoOrgsChannel 名称为 configtx.yaml 中 Profiles 字段下定义的，这里必须指定上面的 channelID
+# [root@xxxx soft]# configtxgen -profile TwoOrgsChannel -outputCreateChannelTx ./channel-artifacts/channel.tx -channelID mychannel
+2019-08-25 02:26:53.395 CST [common.tools.configtxgen] main -> INFO 001 Loading configuration
+2019-08-25 02:26:53.406 CST [common.tools.configtxgen.localconfig] Load -> INFO 002 Loaded configuration: /opt/soft/configtx.yaml
+2019-08-25 02:26:53.417 CST [common.tools.configtxgen.localconfig] completeInitialization -> INFO 003 orderer type: kafka
+2019-08-25 02:26:53.417 CST [common.tools.configtxgen.localconfig] LoadTopLevel -> INFO 004 Loaded configuration: /opt/soft/configtx.yaml
+2019-08-25 02:26:53.417 CST [common.tools.configtxgen] doOutputChannelCreateTx -> INFO 005 Generating new channel configtx
+2019-08-25 02:26:53.418 CST [common.tools.configtxgen] doOutputChannelCreateTx -> INFO 006 Writing new channel tx
+
+  #查看生成文件，是否正确
+  [root@xxx soft]# ls -lt channel-artifacts/
+  -rw-r--r-- 1 root root   346 8月  25 03:18 channel.tx
+  -rw-r--r-- 1 root root 12484 8月  25 03:17 genesis.block
+
+  # 定义组织，生成锚节点更新文件
+  # Org1MSP
+
+  [root@xxxx soft]# configtxgen -profile TwoOrgsChannel -outputAnchorPeersUpdate ./channel-artifacts/Org1MSPanchors.tx -channelID mychannel -asOrg Org1MSP
+2019-08-25 02:28:04.205 CST [common.tools.configtxgen] main -> INFO 001 Loading configuration
+2019-08-25 02:28:04.216 CST [common.tools.configtxgen.localconfig] Load -> INFO 002 Loaded configuration: /opt/soft/configtx.yaml
+2019-08-25 02:28:04.227 CST [common.tools.configtxgen.localconfig] completeInitialization -> INFO 003 orderer type: kafka
+2019-08-25 02:28:04.227 CST [common.tools.configtxgen.localconfig] LoadTopLevel -> INFO 004 Loaded configuration: /opt/soft/configtx.yaml
+2019-08-25 02:28:04.227 CST [common.tools.configtxgen] doOutputAnchorPeersUpdate -> INFO 005 Generating anchor peer update
+2019-08-25 02:28:04.227 CST [common.tools.configtxgen] doOutputAnchorPeersUpdate -> INFO 006 Writing anchor peer update
+
+  # Org2MSP
+  [root@xxxx soft]# configtxgen -profile TwoOrgsChannel -outputAnchorPeersUpdate ./channel-artifacts/Org2MSPanchors.tx -channelID mychannel -asOrg Org2MSP
+2019-08-25 02:28:37.381 CST [common.tools.configtxgen] main -> INFO 001 Loading configuration
+2019-08-25 02:28:37.392 CST [common.tools.configtxgen.localconfig] Load -> INFO 002 Loaded configuration: /opt/soft/configtx.yaml
+2019-08-25 02:28:37.403 CST [common.tools.configtxgen.localconfig] completeInitialization -> INFO 003 orderer type: kafka
+2019-08-25 02:28:37.403 CST [common.tools.configtxgen.localconfig] LoadTopLevel -> INFO 004 Loaded configuration: /opt/soft/configtx.yaml
+2019-08-25 02:28:37.403 CST [common.tools.configtxgen] doOutputAnchorPeersUpdate -> INFO 005 Generating anchor peer update
+2019-08-25 02:28:37.403 CST [common.tools.configtxgen] doOutputAnchorPeersUpdate -> INFO 006 Writing anchor peer update
+
+#拷贝 crypto-config  、channel-artifacts 目录到其他节点服务器
+  #scp -r crypto-config channel-artifacts root@172.31.1.90:/opt/soft
+  #scp -r crypto-config channel-artifacts root@172.31.1.91:/opt/soft
+  #scp -r crypto-config channel-artifacts root@172.31.1.92:/opt/soft
+
+三、部署Zookeeper(3个节点) Kafka(4个节点) 集群
+   注：zk 集群，容器中需要相互指定extra_hosts，并且注意zookeeper定义的ID不要重复，不然无法启动！！！！
+  1.第一节点 (172.31.1.89)，在/opt/soft目录下，编写docker-compose-zookeeper.yaml，如下：
+
+version: '2'
+ 
+services:
+  zookeeper0:
+    container_name: zookeeper0
+    hostname: zookeeper0
+    image: hyperledger/fabric-zookeeper
+    restart: always
+    environment:
+      - ZOO_MY_ID=1
+      - ZOO_SERVERS=server.1=zookeeper0:2888:3888 server.2=zookeeper1:2888:3888 server.3=zookeeper2:2888:3888
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    ports:
+      - 2181:2181
+      - 2888:2888
+      - 3888:3888
+    extra_hosts:
+      - "zookeeper0:172.31.1.89"
+      - "zookeeper1:172.31.1.90"
+      - "zookeeper2:172.31.1.91"
+      - "kafka0:172.31.1.89"
+      - "kafka1:172.31.1.90"
+      - "kafka2:172.31.1.91"
+      - "kafka3:172.31.1.92"
+
+  2.第一节点 (172.31.1.89)，在/opt/soft目录下，编写docker-compose-kafka.yaml，如下
+
+version: '2'
+ 
+services:
+  kafka0:
+    container_name: kafka0
+    hostname: kafka0
+    image: hyperledger/fabric-kafka
+    restart: always
+    environment:
+      - KAFKA_MESSAGE_MAX_BYTES=103809024 
+      - KAFKA_REPLICA_FETCH_MAX_BYTES=103809024
+      - KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE=false
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_MIN_INSYNC_REPLICAS=2
+      - KAFKA_DEFAULT_REPLICATION_FACTOR=3
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper0:2181,zookeeper1:2181,zookeeper2:2181
+      - KAFKA_LOG_RETENTION_MS=-1
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /var/hyperledger/kafka/kafka-logs:/tmp/kafka-logs
+    ports:
+      - 9092:9092
+    extra_hosts:
+      - "zookeeper0:172.31.1.89"
+      - "zookeeper1:172.31.1.90"
+      - "zookeeper2:172.31.1.91"
+      - "kafka0:172.31.1.89"
+      - "kafka1:172.31.1.90"
+      - "kafka2:172.31.1.91"
+      - "kafka3:172.31.1.92"
+
+  3.第二节点 (172.31.1.90)，在/opt/soft目录下，编写docker-compose-zookeeper.yaml，如下
+
+version: '2'
+ 
+services:
+  zookeeper1:
+    container_name: zookeeper1
+    hostname: zookeeper1
+    image: hyperledger/fabric-zookeeper
+    restart: always
+    environment:
+      - ZOO_MY_ID=2
+      - ZOO_SERVERS=server.1=zookeeper0:2888:3888 server.2=zookeeper1:2888:3888 server.3=zookeeper2:2888:3888
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    ports:
+      - 2181:2181
+      - 2888:2888
+      - 3888:3888
+    extra_hosts:
+      - "zookeeper0:172.31.1.89"
+      - "zookeeper1:172.31.1.90"
+      - "zookeeper2:172.31.1.91"
+      - "kafka0:172.31.1.89"
+      - "kafka1:172.31.1.90"
+      - "kafka2:172.31.1.91"
+      - "kafka3:172.31.1.92"
+
+  4.第二节点 (172.31.1.90)，在/opt/soft目录下，编写docker-compose-kafka.yaml，如下
+
+version: '2'
+ 
+services:
+  kafka1:
+    container_name: kafka1
+    hostname: kafka1
+    image: hyperledger/fabric-kafka
+    restart: always
+    environment:
+      - KAFKA_MESSAGE_MAX_BYTES=103809024 
+      - KAFKA_REPLICA_FETCH_MAX_BYTES=103809024 
+      - KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE=false
+    environment:
+      - KAFKA_BROKER_ID=2
+      - KAFKA_MIN_INSYNC_REPLICAS=2
+      - KAFKA_DEFAULT_REPLICATION_FACTOR=3
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper0:2181,zookeeper1:2181,zookeeper2:2181
+      - KAFKA_LOG_RETENTION_MS=-1
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /var/hyperledger/kafka/kafka-logs:/tmp/kafka-logs
+    ports:
+      - 9092:9092
+    extra_hosts:
+      - "zookeeper0:172.31.1.89"
+      - "zookeeper1:172.31.1.90"
+      - "zookeeper2:172.31.1.91"
+      - "kafka0:172.31.1.89"
+      - "kafka1:172.31.1.90"
+      - "kafka2:172.31.1.91"
+      - "kafka3:172.31.1.92"
+
+  5.第三节点 (172.31.1.91)，在/opt/soft目录下，编写docker-compose-zookeeper.yaml，如下
+
+version: '2'
+ 
+services:
+  zookeeper2:
+    container_name: zookeeper2
+    hostname: zookeeper2
+    image: hyperledger/fabric-zookeeper
+    restart: always
+    environment:
+      - ZOO_MY_ID=3
+      - ZOO_SERVERS=server.1=zookeeper0:2888:3888 server.2=zookeeper1:2888:3888 server.3=zookeeper2:2888:3888
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    ports:
+      - 2181:2181
+      - 2888:2888
+      - 3888:3888
+    extra_hosts:
+      - "zookeeper0:172.31.1.89"
+      - "zookeeper1:172.31.1.90"
+      - "zookeeper2:172.31.1.91"
+      - "kafka0:172.31.1.89"
+      - "kafka1:172.31.1.90"
+      - "kafka2:172.31.1.91"
+      - "kafka3:172.31.1.92"
+
+  6.第三节点 (172.31.1.91)，在/opt/soft目录下，编写docker-compose-kafka.yaml，如下
+
+version: '2'
+ 
+services:
+  kafka2:
+    container_name: kafka2
+    hostname: kafka2
+    image: hyperledger/fabric-kafka
+    restart: always
+    environment:
+      - KAFKA_MESSAGE_MAX_BYTES=103809024 
+      - KAFKA_REPLICA_FETCH_MAX_BYTES=103809024 
+      - KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE=false
+    environment:
+      - KAFKA_BROKER_ID=3
+      - KAFKA_MIN_INSYNC_REPLICAS=2
+      - KAFKA_DEFAULT_REPLICATION_FACTOR=3
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper0:2181,zookeeper1:2181,zookeeper2:2181
+      - KAFKA_LOG_RETENTION_MS=-1
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /var/hyperledger/kafka/kafka-logs:/tmp/kafka-logs
+    ports:
+      - 9092:9092
+    extra_hosts:
+      - "zookeeper0:172.31.1.89"
+      - "zookeeper1:172.31.1.90"
+      - "zookeeper2:172.31.1.91"
+      - "kafka0:172.31.1.89"
+      - "kafka1:172.31.1.90"
+      - "kafka2:172.31.1.91"
+      - "kafka3:172.31.1.92"
+
+  7.第四节点 (172.31.1.92)，在/opt/soft目录下，编写docker-compose-kafka.yaml，如下
+
+version: '2'
+ 
+services:
+  kafka3:
+    container_name: kafka3
+    hostname: kafka3
+    image: hyperledger/fabric-kafka
+    restart: always
+    environment:
+      - KAFKA_MESSAGE_MAX_BYTES=103809024 
+      - KAFKA_REPLICA_FETCH_MAX_BYTES=103809024 
+      - KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE=false
+    environment:
+      - KAFKA_BROKER_ID=4
+      - KAFKA_MIN_INSYNC_REPLICAS=2
+      - KAFKA_DEFAULT_REPLICATION_FACTOR=3
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper0:2181,zookeeper1:2181,zookeeper2:2181
+      - KAFKA_LOG_RETENTION_MS=-1
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /var/hyperledger/kafka/kafka-logs:/tmp/kafka-logs
+    ports:
+      - 9092:9092
+    extra_hosts:
+      - "zookeeper0:172.31.1.89"
+      - "zookeeper1:172.31.1.90"
+      - "zookeeper2:172.31.1.91"
+      - "kafka0:172.31.1.89"
+      - "kafka1:172.31.1.90"
+      - "kafka2:172.31.1.91"
+      - "kafka3:172.31.1.92"
+#启动服务
+ 启动服务顺序先启动zookeeper集群,再启动kafka集群
+ docker-compose -f docker-compose-zookeeper.yaml up -d
+ docker-compose -f docker-compose-kafka.yaml up -d
+
+四、部署Hyperledger Fabric Orderer排序服务集群，3个节点
+  1.第一个节点 (172.31.1.89)，在/opt/soft目录下，编写docker-compose-orderer.yaml，如下：
+
+version: '2'
+
+services:
+  orderer0.example.com:
+    container_name: orderer0.example.com
+    image: hyperledger/fabric-orderer
+    environment:
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft_default
+      - ORDERER_GENERAL_LOGLEVEL=debug
+      - ORDERER_GENERAL_LISTENADDRESS=0.0.0.0
+      - ORDERER_GENERAL_GENESISMETHOD=file
+      - ORDERER_GENERAL_GENESISFILE=/var/hyperledger/orderer/orderer.genesis.block
+      - ORDERER_GENERAL_LOCALMSPID=OrdererMSP
+      - ORDERER_GENERAL_LOCALMSPDIR=/var/hyperledger/orderer/msp
+      - ORDERER_GENERAL_TLS_ENABLED=false
+      - ORDERER_GENERAL_TLS_PRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_GENERAL_TLS_CERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_GENERAL_TLS_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+      - ORDERER_KAFKA_RETRY_LONGINTERVAL=10s
+      - ORDERER_KAFKA_RETRY_LONGTOTAL=100s
+      - ORDERER_KAFKA_RETRY_SHORTINTERVAL=1s
+      - ORDERER_KAFKA_RETRY_SHORTTOTAL=30s
+      - ORDERER_KAFKA_VERBOSE=true
+      - ORDERER_KAFKA_BROKERS=[kafka0:9092,kafka1:9092,kafka2:9092,kafka3:9092]
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric
+    command: orderer
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /var/hyperledger/order_data/:/var/hyperledger/production/
+      - ./channel-artifacts/genesis.block:/var/hyperledger/orderer/orderer.genesis.block
+      - ./crypto-config/ordererOrganizations/example.com/orderers/orderer0.example.com/msp:/var/hyperledger/orderer/msp
+      - ./crypto-config/ordererOrganizations/example.com/orderers/orderer0.example.com/tls/:/var/hyperledger/orderer/tls
+    ports:
+      - 7050:7050
+    extra_hosts:
+      - "zookeeper0:172.31.1.89"
+      - "zookeeper1:172.31.1.90"
+      - "zookeeper2:172.31.1.91"
+      - "kafka0:172.31.1.89"
+      - "kafka1:172.31.1.90"
+      - "kafka2:172.31.1.91"
+      - "kafka3:172.31.1.92"
+
+
+  2.第二个节点 (172.31.1.90)，在/opt/soft目录下，编写docker-compose-orderer.yaml，如下：
+
+version: '2'
+services:
+  orderer1.example.com:
+    container_name: orderer1.example.com
+    image: hyperledger/fabric-orderer
+    environment:
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft_default
+      - ORDERER_GENERAL_LOGLEVEL=debug
+      - ORDERER_GENERAL_LISTENADDRESS=0.0.0.0
+      - ORDERER_GENERAL_GENESISMETHOD=file
+      - ORDERER_GENERAL_GENESISFILE=/var/hyperledger/orderer/orderer.genesis.block
+      - ORDERER_GENERAL_LOCALMSPID=OrdererMSP
+      - ORDERER_GENERAL_LOCALMSPDIR=/var/hyperledger/orderer/msp
+      - ORDERER_GENERAL_TLS_ENABLED=false
+      - ORDERER_GENERAL_TLS_PRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_GENERAL_TLS_CERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_GENERAL_TLS_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+      - ORDERER_KAFKA_RETRY_LONGINTERVAL=10s
+      - ORDERER_KAFKA_RETRY_LONGTOTAL=100s
+      - ORDERER_KAFKA_RETRY_SHORTINTERVAL=1s
+      - ORDERER_KAFKA_RETRY_SHORTTOTAL=30s
+      - ORDERER_KAFKA_VERBOSE=true
+      - ORDERER_KAFKA_BROKERS=[kafka0:9092,kafka1:9092,kafka2:9092,kafka3:9092]
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric
+    command: orderer
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /var/hyperledger/order_data/:/var/hyperledger/production/
+      - ./channel-artifacts/genesis.block:/var/hyperledger/orderer/orderer.genesis.block
+      - ./crypto-config/ordererOrganizations/example.com/orderers/orderer1.example.com/msp:/var/hyperledger/orderer/msp
+      - ./crypto-config/ordererOrganizations/example.com/orderers/orderer1.example.com/tls/:/var/hyperledger/orderer/tls
+    ports:
+      - 7050:7050
+    extra_hosts:
+      - "zookeeper0:172.31.1.89"
+      - "zookeeper1:172.31.1.90"
+      - "zookeeper2:172.31.1.91"    
+      - "kafka0:172.31.1.89"
+      - "kafka1:172.31.1.90"
+      - "kafka2:172.31.1.91"
+      - "kafka3:172.31.1.92"
+
+  3.第三个节点 (172.31.1.91)，在/opt/soft目录下，编写docker-compose-orderer.yaml，如下：
+
+version: '2'
+services:
+  orderer2.example.com:
+    container_name: orderer2.example.com
+    image: hyperledger/fabric-orderer
+    environment:
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft_default
+      - ORDERER_GENERAL_LOGLEVEL=debug
+      - ORDERER_GENERAL_LISTENADDRESS=0.0.0.0
+      - ORDERER_GENERAL_GENESISMETHOD=file
+      - ORDERER_GENERAL_GENESISFILE=/var/hyperledger/orderer/orderer.genesis.block
+      - ORDERER_GENERAL_LOCALMSPID=OrdererMSP
+      - ORDERER_GENERAL_LOCALMSPDIR=/var/hyperledger/orderer/msp
+      - ORDERER_GENERAL_TLS_ENABLED=false
+      - ORDERER_GENERAL_TLS_PRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_GENERAL_TLS_CERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_GENERAL_TLS_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+      - ORDERER_KAFKA_RETRY_LONGINTERVAL=10s
+      - ORDERER_KAFKA_RETRY_LONGTOTAL=100s
+      - ORDERER_KAFKA_RETRY_SHORTINTERVAL=1s
+      - ORDERER_KAFKA_RETRY_SHORTTOTAL=30s
+      - ORDERER_KAFKA_VERBOSE=true
+      - ORDERER_KAFKA_BROKERS=[kafka0:9092,kafka1:9092,kafka2:9092,kafka3:9092]
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric
+    command: orderer
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /var/hyperledger/order_data/:/var/hyperledger/production/
+      - ./channel-artifacts/genesis.block:/var/hyperledger/orderer/orderer.genesis.block
+      - ./crypto-config/ordererOrganizations/example.com/orderers/orderer2.example.com/msp:/var/hyperledger/orderer/msp
+      - ./crypto-config/ordererOrganizations/example.com/orderers/orderer2.example.com/tls/:/var/hyperledger/orderer/tls
+    ports:
+      - 7050:7050
+    extra_hosts:
+      - "zookeeper0:172.31.1.89"
+      - "zookeeper1:172.31.1.90"
+      - "zookeeper2:172.31.1.91"    
+      - "kafka0:172.31.1.89"
+      - "kafka1:172.31.1.90"
+      - "kafka2:172.31.1.91"
+      - "kafka3:172.31.1.92"
+
+  #启动服务，按照节点顺序启动
+  docker-compose -f docker-compose-orderer.yaml up -d
+  # docker logs xxx 
+        2019-08-25 15:35:35.436 CST [orderer.common.server] Start -> INFO 008 Beginning to serve requests
+        2019-08-25 15:35:35.436 CST [orderer.consensus.kafka] setupTopicForChannel -> INFO 009 [channel: testchainid] Setting up the topic for this channel...
+        2019-08-25 15:35:35.475 CST [orderer.consensus.kafka] setupProducerForChannel -> INFO 00a [channel: testchainid] Setting up the producer for this channel...
+        2019-08-25 15:35:35.487 CST [orderer.consensus.kafka] startThread -> INFO 00b [channel: testchainid] Producer set up successfully
+        2019-08-25 15:35:35.487 CST [orderer.consensus.kafka] sendConnectMessage -> INFO 00c [channel: testchainid] About to post the CONNECT message...
+        2019-08-25 15:35:35.842 CST [orderer.consensus.kafka] startThread -> INFO 00d [channel: testchainid] CONNECT message posted successfully
+        2019-08-25 15:35:35.842 CST [orderer.consensus.kafka] setupParentConsumerForChannel -> INFO 00e [channel: testchainid] Setting up the parent consumer for this channel...
+        2019-08-25 15:35:35.849 CST [orderer.consensus.kafka] startThread -> INFO 00f [channel: testchainid] Parent consumer set up successfully
+        2019-08-25 15:35:35.849 CST [orderer.consensus.kafka] setupChannelConsumerForChannel -> INFO 010 [channel: testchainid] Setting up the channel consumer for this channel (start offset: -2)...
+
+
+五、部署Hyperledger Fabric Peer排序服务集群，4个节点
+    注意：Peer节点下都必须启动一个数据存储，如 file 或者 couchdb 等，示例采用couchdb，并且强烈建议另外挂载可扩容的存储设备(阿里云云盘，NAS,OSS)！！！
+    如示例中，挂载阿里云云盘至节点主机 /mnt/data/couchdb0/data(宿主挂载路径)
+    下列容器couchdb0配置项中，增加如下
+     volumes:
+      # 数据持久化，用于存储链码值
+      - /mnt/data/couchdb0/data:/opt/couchdb/data
+  1.第一个节点 (172.31.1.89)，在/opt/soft目录下，编写docker-compose-peer.yaml，如下：
+    注：配置参数CORE_PEER_TLS_ENABLED=false,如果启用tls认证，必须改为true
+
+version: '2'
+ 
+services:
+  couchdb0:
+    container_name: couchdb0
+    image: hyperledger/fabric-couchdb
+    environment:
+      - COUCHDB_USER=
+      - COUCHDB_PASSWORD=
+    ports:
+      - "5984:5984"
+    volumes:
+      # 数据持久化，用于存储链码值
+      - /mnt/data/couchdb0/data:/opt/couchdb/data
+
+  peer0.org1.example.com:
+    container_name: peer0.org1.example.com
+    hostname: peer0.org1.example.com
+    image: hyperledger/fabric-peer
+    environment:
+      - CORE_LEDGER_STATE_STATEDATABASE=CouchDB
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_COUCHDBADDRESS=couchdb0:5984
+
+      - CORE_PEER_ID=peer0.org1.example.com
+      - CORE_PEER_NETWORKID=soft
+      - CORE_PEER_ADDRESS=peer0.org1.example.com:7051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer0.org1.example.com:7051
+      - CORE_PEER_LOCALMSPID=Org1MSP
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft
+      - CORE_LOGGING_LEVEL=DEBUG
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft_default
+      - CORE_PEER_GOSSIP_SKIPHANDSHAKE=true
+      - CORE_PEER_GOSSIP_USELEADERELECTION=true
+      - CORE_PEER_GOSSIP_ORGLEADER=false
+      - CORE_PEER_PROFILE_ENABLED=false
+      - CORE_CHAINCODE_EXECUTETIMEOUT=1000s
+      - CORE_CHAINCODE_DEPLOYTIMEOUT=1000s
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    command: peer node start
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro    
+      - /var/run/:/host/var/run/
+      - /var/hyperledger/peer_data/:/var/hyperledger/production/
+      - ./crypto-config/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/msp:/etc/hyperledger/fabric/msp
+      - ./crypto-config/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls:/etc/hyperledger/fabric/tls
+    ports:
+      - 7051:7051
+      - 7052:7052
+      - 7053:7053
+    depends_on:
+      - couchdb0      
+    extra_hosts:
+      - "couchdb0:172.31.1.89"
+      - "orderer0.example.com:172.31.1.89"
+      - "orderer1.example.com:172.31.1.90"
+      - "orderer2.example.com:172.31.1.91"    
+
+  2.第二个节点 (172.31.1.90)，在/opt/soft目录下，编写docker-compose-peer.yaml，如下：
+    注：配置参数CORE_PEER_TLS_ENABLED=false,如果启用tls认证，必须改为true
+
+version: '2'
+ 
+services:
+  couchdb1:
+    container_name: couchdb1
+    image: hyperledger/fabric-couchdb
+    environment:
+      - COUCHDB_USER=
+      - COUCHDB_PASSWORD=
+    ports:
+      - "5984:5984"
+    volumes:
+      # 数据持久化，用于存储链码值
+      - /mnt/data/couchdb1/data:/opt/couchdb/data
+
+  peer1.org1.example.com:
+    container_name: peer1.org1.example.com
+    hostname: peer1.org1.example.com
+    image: hyperledger/fabric-peer
+    environment:
+      - CORE_LEDGER_STATE_STATEDATABASE=CouchDB
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_COUCHDBADDRESS=couchdb1:5984
+      - CORE_PEER_ID=peer1.org1.example.com
+      - CORE_PEER_NETWORKID=soft
+      - CORE_PEER_ADDRESS=peer1.org1.example.com:7051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer1.org1.example.com:7051
+      - CORE_PEER_LOCALMSPID=Org1MSP
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft
+      - CORE_LOGGING_LEVEL=DEBUG
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft_default
+      - CORE_PEER_GOSSIP_SKIPHANDSHAKE=true
+      - CORE_PEER_GOSSIP_USELEADERELECTION=true
+      - CORE_PEER_GOSSIP_ORGLEADER=false
+      - CORE_PEER_PROFILE_ENABLED=false
+      - CORE_CHAINCODE_EXECUTETIMEOUT=1000s
+      - CORE_CHAINCODE_DEPLOYTIMEOUT=1000s
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    command: peer node start
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro        
+      - /var/run/:/host/var/run/
+      - /var/hyperledger/peer_data/:/var/hyperledger/production/
+      - ./crypto-config/peerOrganizations/org1.example.com/peers/peer1.org1.example.com/msp:/etc/hyperledger/fabric/msp
+      - ./crypto-config/peerOrganizations/org1.example.com/peers/peer1.org1.example.com/tls:/etc/hyperledger/fabric/tls
+    ports:
+      - 7051:7051
+      - 7052:7052
+      - 7053:7053
+    depends_on:
+      - couchdb1      
+    extra_hosts:
+      - "couchdb1:172.31.1.90"
+      - "orderer0.example.com:172.31.1.89"
+      - "orderer1.example.com:172.31.1.90"
+      - "orderer2.example.com:172.31.1.91"
+ 
+  3.第三个节点 (172.31.1.91)，在/opt/soft目录下，编写docker-compose-peer.yaml，如下：
+    注：配置参数CORE_PEER_TLS_ENABLED=false,如果启用tls认证，必须改为true
+
+version: '2'
+ 
+services:
+  couchdb2:
+    container_name: couchdb2
+    image: hyperledger/fabric-couchdb
+    environment:
+      - COUCHDB_USER=
+      - COUCHDB_PASSWORD=
+    ports:
+      - "5984:5984"
+    volumes:
+      # 数据持久化，用于存储链码值
+      - /mnt/data/couchdb2/data:/opt/couchdb/data
+
+  peer0.org2.example.com:
+    container_name: peer0.org2.example.com
+    hostname: peer0.org2.example.com
+    image: hyperledger/fabric-peer
+    environment:
+      - CORE_LEDGER_STATE_STATEDATABASE=CouchDB
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_COUCHDBADDRESS=couchdb2:5984
+      - CORE_PEER_ID=peer0.org2.example.com
+      - CORE_PEER_NETWORKID=soft
+      - CORE_PEER_ADDRESS=peer0.org2.example.com:7051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer0.org2.example.com:7051
+      - CORE_PEER_LOCALMSPID=Org2MSP
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft
+      - CORE_LOGGING_LEVEL=DEBUG
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft_default
+      - CORE_PEER_GOSSIP_SKIPHANDSHAKE=true
+      - CORE_PEER_GOSSIP_USELEADERELECTION=true
+      - CORE_PEER_GOSSIP_ORGLEADER=false
+      - CORE_PEER_PROFILE_ENABLED=false
+      - CORE_CHAINCODE_EXECUTETIMEOUT=1000s
+      - CORE_CHAINCODE_DEPLOYTIMEOUT=1000s
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    command: peer node start
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro      
+      - /var/run/:/host/var/run/
+      - /var/hyperledger/peer_data/:/var/hyperledger/production/
+      - ./crypto-config/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/msp:/etc/hyperledger/fabric/msp
+      - ./crypto-config/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls:/etc/hyperledger/fabric/tls
+    ports:
+      - 7051:7051
+      - 7052:7052
+      - 7053:7053
+    depends_on:
+      - couchdb2
+    extra_hosts:
+      - "couchdb2:172.31.1.91"
+      - "orderer0.example.com:172.31.1.89"
+      - "orderer1.example.com:172.31.1.90"
+      - "orderer2.example.com:172.31.1.91"
+
+  
+  4.第四个节点 (172.31.1.92)，在/opt/soft目录下，编写docker-compose-peer.yaml，如下：
+    注：配置参数CORE_PEER_TLS_ENABLED=false,如果启用tls认证，必须改为true
+version: '2'
+ 
+services:
+  couchdb3:
+    container_name: couchdb3
+    image: hyperledger/fabric-couchdb
+    environment:
+      - COUCHDB_USER=
+      - COUCHDB_PASSWORD=
+    ports:
+      - "5984:5984"
+    volumes:
+      # 数据持久化，用于存储链码值
+      - /mnt/data/couchdb3/data:/opt/couchdb/data
+
+  peer1.org2.example.com:
+    container_name: peer1.org2.example.com
+    hostname: peer1.org2.example.com
+    image: hyperledger/fabric-peer
+    environment:
+      - CORE_LEDGER_STATE_STATEDATABASE=CouchDB
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_COUCHDBADDRESS=couchdb3:5984    
+      - CORE_PEER_ID=peer1.org2.example.com
+      - CORE_PEER_NETWORKID=soft
+      - CORE_PEER_ADDRESS=peer1.org2.example.com:7051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer1.org2.example.com:7051
+      - CORE_PEER_LOCALMSPID=Org2MSP
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft
+      - CORE_LOGGING_LEVEL=DEBUG
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft_default
+      - CORE_PEER_GOSSIP_SKIPHANDSHAKE=true
+      - CORE_PEER_GOSSIP_USELEADERELECTION=true
+      - CORE_PEER_GOSSIP_ORGLEADER=false
+      - CORE_PEER_PROFILE_ENABLED=false
+      - CORE_CHAINCODE_EXECUTETIMEOUT=1000s
+      - CORE_CHAINCODE_DEPLOYTIMEOUT=1000s
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    command: peer node start
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro     
+      - /var/run/:/host/var/run/
+      - /var/hyperledger/peer_data/:/var/hyperledger/production/
+      - ./crypto-config/peerOrganizations/org2.example.com/peers/peer1.org2.example.com/msp:/etc/hyperledger/fabric/msp
+      - ./crypto-config/peerOrganizations/org2.example.com/peers/peer1.org2.example.com/tls:/etc/hyperledger/fabric/tls
+    ports:
+      - 7051:7051
+      - 7052:7052
+      - 7053:7053
+    depends_on:
+      - couchdb3
+
+    extra_hosts:
+      - "couchdb3:172.31.1.92"
+      - "orderer0.example.com:172.31.1.89"
+      - "orderer1.example.com:172.31.1.90"
+      - "orderer2.example.com:172.31.1.91"
+ 
+   #启动peer节点服务
+   #docker-compose -f docker-compose-peer.yaml up -d
+   #docker logs xxx
+   2019-08-25 02:05:20.638 UTC [nodeCmd] serve -> INFO 124 Starting peer with ID=[name:"peer0.org1.example.com" ], network ID=[soft], address=[peer0.org1.example.com:7051]
+   2019-08-25 02:05:20.638 UTC [nodeCmd] serve -> INFO 125 Started peer with ID=[name:"peer0.org1.example.com" ], network ID=[soft], address=[peer0.org1.example.com:7051]
+
+六、部署Hyperledger Fabric cli 客户端服务
+  1.在第一节点(172.31.1.89)只需要配置一个既可,其他节点可不用部署,用于调用创建 channel 与 智能合约 
+   #在/opt/soft目录下，编写docker-compose-peer.yaml，如下：
+    注：配置参数CORE_PEER_TLS_ENABLED=false,如果启用tls认证，必须改为true
+
+version: '2'
+ 
+services:
+  
+  cli:
+    container_name: cli
+    image: hyperledger/fabric-tools
+    tty: true
+    environment:
+      - GOPATH=/opt/gopath
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_LOGGING_LEVEL=DEBUG
+      - CORE_PEER_ID=cli
+      - CORE_PEER_ADDRESS=peer0.org1.example.com:7051
+      - CORE_PEER_LOCALMSPID=Org1MSP
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_TLS_CERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+      - CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro    
+      - /var/run/:/host/var/run/
+      - /usr/local/go:/opt/go
+      - /opt/gopath:/opt/gopath
+      - ./chaincode/go/:/opt/gopath/src/github.com/hyperledger/fabric/examples/chaincode/go
+      - ./crypto-config:/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/
+      - ./channel-artifacts:/opt/gopath/src/github.com/hyperledger/fabric/peer/channel-artifacts
+    extra_hosts:
+      - "orderer0.example.com:172.31.1.89"
+      - "orderer1.example.com:172.31.1.90"
+      - "orderer2.example.com:172.31.1.91"
+      - "peer0.org1.example.com:172.31.1.89"
+      - "peer1.org1.example.com:172.31.1.90"
+      - "peer0.org2.example.com:172.31.1.91"
+      - "peer1.org2.example.com:172.31.1.92"
+  ##启动服务
+  #docker-compose -f docker-compose-cli.yaml up -d
+
+七、Hyperledger Fabric 创建 Channel
+
+ 1.在第一节点(172.31.1.89),进入 cli 容器，我们可以直接进入 容器里操作
+  [root@xxxxx soft]# docker exec -it cli bash
+  root@77962643125a:/opt/gopath/src/github.com/hyperledger/fabric/peer# 
+
+  # 执行 创建命令 (未开启认证)
+  #peer channel create -c mychannel -f ./channel-artifacts/channel.tx --orderer orderer0.example.com:7050
+
+ /***********
+  # 以下为启用认证
+  #peer channel create -o orderer0.example.com:7050 -c mychannel -f ./channel-artifacts/channel.tx --tls $CORE_PEER_TLS_ENABLED --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer0.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+ ******************/
+
+  # 创建以后生成文件 mychannel.block
+
+
+2.继续在第一节点(172.31.1.89),cli 容器中，执行把现有所有节点服务peer节点加入到Channel中，示例现有4个peer
+  # peer0.org1.example.com 加入 此 channel 中，首先需要查看如下 环境变量
+
+    echo $CORE_PEER_LOCALMSPID
+    echo $CORE_PEER_ADDRESS
+    echo $CORE_PEER_TLS_ROOTCERT_FILE
+    echo $CORE_PEER_MSPCONFIGPATH
+
+    # echo $CORE_PEER_LOCALMSPID
+    Org1MSP
+    # echo $CORE_PEER_ADDRESS
+    peer0.org1.example.com:7051
+    # echo $CORE_PEER_MSPCONFIGPATH
+    /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+    # echo $CORE_PEER_TLS_ROOTCERT_FILE
+    /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+
+
+  # 加入 channel
+  #peer channel join -b mychannel.block
+  输出：
+  2019-08-25 16:40:10.255 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:40:10.259 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:40:10.260 CST [channelCmd] InitCmdFactory -> INFO 003 Endorser and orderer connections initialized
+  2019-08-25 16:40:10.371 CST [channelCmd] executeJoin -> INFO 004 Successfully submitted proposal to join channel
+
+
+
+  # peer1.org1.example.com 加入 此 channel 中，这里配置一下环境变量
+
+    export CORE_PEER_LOCALMSPID="Org1MSP"
+    export CORE_PEER_ADDRESS=peer1.org1.example.com:7051
+    export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer1.org1.example.com/tls/ca.crt
+    export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+
+  #peer channel join -b mychannel.block
+  输出：
+  2019-08-25 16:43:09.353 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:43:09.357 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:43:09.358 CST [channelCmd] InitCmdFactory -> INFO 003 Endorser and orderer connections initialized
+  2019-08-25 16:43:09.473 CST [channelCmd] executeJoin -> INFO 004 Successfully submitted proposal to join channe
+
+
+  # peer0.Org2.example.com 加入 此 channel 中，这里配置一下环境变量
+
+  export CORE_PEER_LOCALMSPID="Org2MSP"
+  export CORE_PEER_ADDRESS=peer0.org2.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+
+  #peer channel join -b mychannel.block
+  输出：
+  2019-08-25 16:45:17.626 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:45:17.630 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:45:17.632 CST [channelCmd] InitCmdFactory -> INFO 003 Endorser and orderer connections initialized
+  2019-08-25 16:45:17.757 CST [channelCmd] executeJoin -> INFO 004 Successfully submitted proposal to join channel
+
+
+  # peer1.org2.example.com 加入 此 channel 中，这里配置一下环境变量
+
+  export CORE_PEER_LOCALMSPID="Org2MSP"
+  export CORE_PEER_ADDRESS=peer1.org2.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer1.org2.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+
+  #peer channel join -b mychannel.block
+  输出：
+  2019-08-25 16:46:58.401 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:46:58.405 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:46:58.407 CST [channelCmd] InitCmdFactory -> INFO 003 Endorser and orderer connections initialized
+  2019-08-25 16:46:58.523 CST [channelCmd] executeJoin -> INFO 004 Successfully submitted proposal to join channel
+
+
+八、Hyperledger Fabric 锚节点
+  1.锚节点通过广播的方式通知有新节点加入
+  # 使用Org1的管理员身份更新锚节点配置 
+  # 同样需要先配置变量
+
+  export CORE_PEER_LOCALMSPID="Org1MSP"
+  export CORE_PEER_ADDRESS=peer0.org1.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+
+  # 未开启认证的方式
+  #peer channel update -o orderer0.example.com:7050 -c mychannel -f ./channel-artifacts/Org1MSPanchors.tx
+  输出：
+  2019-08-25 16:49:42.877 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:49:42.881 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:49:42.882 CST [channelCmd] InitCmdFactory -> INFO 003 Endorser and orderer connections initialized
+  2019-08-25 16:49:43.018 CST [channelCmd] update -> INFO 004 Successfully submitted channel update
+
+
+  # 使用Org2的管理员身份更新锚节点配置 
+  # 同样需要先配置变量
+
+  export CORE_PEER_LOCALMSPID="Org2MSP"
+  export CORE_PEER_ADDRESS=peer0.org2.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+
+  #peer channel update -o orderer0.example.com:7050 -c mychannel -f ./channel-artifacts/Org2MSPanchors.tx
+  输出：
+  2019-08-25 16:52:44.317 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:52:44.321 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 16:52:44.322 CST [channelCmd] InitCmdFactory -> INFO 003 Endorser and orderer connections initialized
+  2019-08-25 16:52:44.362 CST [channelCmd] update -> INFO 004 Successfully submitted channel update
+
+  ##把当前cli环境变量恢复为最初配置
+    export CORE_PEER_LOCALMSPID="Org1MSP"
+    export CORE_PEER_ADDRESS=peer0.org1.example.com:7051
+    export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+    export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+
+
+九、Hyperledger Fabric 实例化测试
+  1.安装智能合约
+  ## cli 容器部分预先挂载了目录：  ./chaincode/go/:/opt/gopath/src/github.com/hyperledger/fabric/examples/chaincode/go
+  #第一节点(172.31.1.89)拷贝了官方的例子，在 chaincode 下, 下面我们来测试一下
+  #cd /opt/soft/
+  #[root@xxxx soft]# cp -r /opt/gopath/src/github.com/hyperledger/fabric/examples/chaincode/go/example0* ./chaincode/go/
+  [root@xxxx soft]# cd chaincode/go/
+  [root@xxx go]# ll
+  total 20
+  drwxr-xr-x 3 root root 4096 Aug 25 16:57 example01
+  drwxr-xr-x 3 root root 4096 Aug 25 16:57 example02
+  drwxr-xr-x 3 root root 4096 Aug 25 16:57 example03
+  drwxr-xr-x 3 root root 4096 Aug 25 16:57 example04
+  drwxr-xr-x 3 root root 4096 Aug 25 16:57 example05
+  
+  #这里示例测试引用example02，需要对example02进行下面修改
+     # 注: 这里面的 example02 的 package 为 example02 会报错
+     Error: could not assemble transaction, err Proposal response was not successful, error code 500, msg failed to execute transaction 819b581ce88604e9b6651764324876f2ca7a47d7aeb7ee307f273af867a4a134: error starting container: error starting container: API error (404): oci runtime error: container_linux.go:247: starting container process caused "exec: \"chaincode\": executable file not found in $PATH"
+
+  # 将 chaincode.go  chaincode_test.go 中  package 修改成 main 然后在最下面增加 main()函数
+func main() {
+        err := shim.Start(new(SimpleChaincode))
+        if err != nil {
+                fmt.Printf("Error starting Simple chaincode: %s", err)
+        }
+}
+
+
+
+  # 安装指定合约到 所有的 peer 节点中，每个节点都必须安装一次
+  # 同样需要先配置变量  
+  ##peer0.org1.example.com
+
+  export CORE_PEER_LOCALMSPID="Org1MSP"
+  export CORE_PEER_ADDRESS=peer0.org1.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+
+  # 安装 合约
+
+  #peer chaincode install -n example2 -p github.com/hyperledger/fabric/examples/chaincode/go/example02 -v 1.0   
+  输出：
+  2019-08-25 17:09:28.929 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:09:28.933 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:09:28.936 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-25 17:09:28.937 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+  2019-08-25 17:09:30.612 CST [chaincodeCmd] install -> INFO 005 Installed remotely response:<status:200 payload:"OK" > 
+
+
+  ##peer1.org1.example.com
+
+  export CORE_PEER_LOCALMSPID="Org1MSP"
+  export CORE_PEER_ADDRESS=peer1.org1.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer1.org1.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+
+  #peer chaincode install -n example2 -p github.com/hyperledger/fabric/examples/chaincode/go/example02 -v 1.0 
+  输出：
+  2019-08-25 17:13:15.194 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:13:15.197 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:13:15.201 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-25 17:13:15.201 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+  2019-08-25 17:13:15.544 CST [chaincodeCmd] install -> INFO 005 Installed remotely response:<status:200 payload:"OK" > 
+
+  ##peer0.org2.example.com
+
+  export CORE_PEER_LOCALMSPID="Org2MSP"
+  export CORE_PEER_ADDRESS=peer0.org2.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+
+  #peer chaincode install -n example2 -p github.com/hyperledger/fabric/examples/chaincode/go/example02 -v 1.0 
+  输出：
+  2019-08-25 17:15:16.573 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:15:16.577 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:15:16.581 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-25 17:15:16.581 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+  2019-08-25 17:15:16.860 CST [chaincodeCmd] install -> INFO 005 Installed remotely response:<status:200 payload:"OK" > 
+
+
+  ##peer1.org2.example.com
+
+  export CORE_PEER_LOCALMSPID="Org2MSP"
+  export CORE_PEER_ADDRESS=peer1.org2.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer1.org2.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+
+  #peer chaincode install -n example2 -p github.com/hyperledger/fabric/examples/chaincode/go/example02 -v 1.0
+  输出：
+  2019-08-25 17:16:43.117 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:16:43.121 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:16:43.124 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-25 17:16:43.124 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+  2019-08-25 17:16:43.396 CST [chaincodeCmd] install -> INFO 005 Installed remotely response:<status:200 payload:"OK" > 
+
+  #恢复当前cli环境变量
+  export CORE_PEER_LOCALMSPID="Org1MSP"
+  export CORE_PEER_ADDRESS=peer0.org1.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+
+
+
+十、实例化 Chaincode
+  1.第一节点(172.31.1.89)，进入cli容器,无论多少个 peer 节点, 实例化只需要实例化一次即可。
+  # 实例化合约 (未认证)
+  #peer chaincode instantiate -o orderer0.example.com:7050 -C mychannel -n example2 -c '{"Args":["init","A","200","B","500"]}' -P "OR ('Org1MSP.member','Org2MSP.member')" -v 1.0
+  输出：
+  2019-08-25 17:19:32.439 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:19:32.443 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:19:32.447 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-25 17:19:32.447 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+
+  2.操作智能合约
+  # query 查询方法
+  # 查询 A 账户里的余额
+
+  #peer chaincode query -C mychannel -n example2 -c '{"Args":["query","A"]}'
+  输出：
+  2019-08-25 17:25:55.246 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:25:55.250 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  200
+
+
+  # 查询 B 账户里的余额
+  #peer chaincode query -C mychannel -n example2 -c '{"Args":["query","B"]}'
+  输出：
+  2019-08-25 17:31:17.138 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:31:17.143 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  500
+
+  # invoke 转账方法
+  # 从A账户 转账 100 个币 到 B 账户
+  #peer chaincode invoke -C mychannel -n example2 -c '{"Args":["invoke", "A", "B", "100"]}'
+  输出：
+  2019-08-25 17:34:39.040 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:34:39.045 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:34:39.054 CST [chaincodeCmd] InitCmdFactory -> INFO 003 Retrieved channel (mychannel) orderer endpoint: orderer0.example.com:7050
+  2019-08-25 17:34:39.177 CST [chaincodeCmd] chaincodeInvokeOrQuery -> INFO 004 Chaincode invoke successful. result: status:200 
+
+  # B 账户余额 
+  #peer chaincode query -C mychannel -n example2 -c '{"Args":["query","B"]}'  
+  输出：
+  2019-08-25 17:35:40.335 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-25 17:35:40.339 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  600
+
+  # 查看 peer0.org1.example.com 节点里 生成的容器
+  # docker ps -a
+  CONTAINER ID        IMAGE                                                                                                       COMMAND                  CREATED             STATUS              PORTS                                                                    NAMES
+  a32b63ecbc06        soft-peer0.org1.example.com-example2-1.0-d0878f91cfdef1f96b45622ea9fb58a5c15c5df7fa1c97e1f40fac8ce325793d   "chaincode -peer.add…"   16 minutes ago      Up 15 minutes                                                                                soft-peer0.org1.example.com-example2-1.0
+
+
+
+十一、其他Hyperledger Fabric 常用操作命令，或者--help参数参考
+        peer 命令
+
+        peer chaincode          # 对链进行操作
+        peer channel            # channel相关操作
+        peer logging            # 设置日志级别
+        peer node               # 启动、管理节点
+        peer version            # 查看版本信息
+
+        # 查看 已经创建的 通道 (channel)
+        peer channel  list
+        # 查看通道(channel) 的状态 -c(小写) 加 通道名称
+        peer channel getinfo -c mychannel
+        # 查看已经 安装的 智能合约(chincode)
+        peer chaincode  list --installed
+        # 查看已经 实例化的 智能合约(chincode) 需要使用 -C(大写) 加通道名称
+        peer chaincode -C mychannel list --instantiated
+
+
+其他补充：
+  1.upgrade 更新合约 更新合约相当于将合约重新实例化，并带有一个新的版本号。
+
+  #更新合约之前，需要在所有的 peer节点 上安装(install)最新的合约，并使用新的版本号。
+  # 更新合约
+  # 首先安装(install)新的合约, 以本文为例, chaincode_example02, 初次安装版本号为 1.0 
+
+  #peer chaincode install -n example2 -p github.com/hyperledger/fabric/example/chaincode/go/chaincode_example02 -v 1.1
+
+
+  # 更新版本为 1.1 的合约
+  #peer chaincode upgrade -o orderer0.example.com:7050 -C mychannel -n example2 -c '{"Args":["init","A","100","B","50"]}' -P "OR ('Org1MSP.member','Org2MSP.member')" -v 1.1
+
+  # 旧版本的合约, 目前，fabric不支持合约的启动与暂停。要暂停或删除合约，只能到peer上手动删除容器。
+
+
+
+
+
+十二、###########以下为测试验证动态添加组织(未开启tls认证)#############
+  场景：在已有上面2个组织，4个节点正在运行区块链集群网络下，需要动态新增组织、节点
+
+  总结归纳大致流程：
+     
+    -->为新 org 生成证书 
+    -->为新 org 生成配置文件 
+    -->生成和提交新 org 的配置 
+      --> peer channel fetch config 获取当前通道信息，生成增量包 
+      --> peer channel signconfigtx 为配置交易签名
+      --> peer channel update 提交签名后的配置交易至 orderer 
+    -->将新 org 添加入 channel 通道
+      -->启动新 org 集群 
+      -->peer channel join 将新 org 下的 peer 加入 channel 
+    -->升级chaincode和背书策略
+      -->peer chaincode install 为新 org 的 peer 安装 chaincode 
+      -->peer chaincode install 为原有org的peer升级 chaincode 
+      -->peer chaincode upgrade 升级背书策略 
+    -->交易查询测试
+
+
+  1.初始化新增两个节点服务器环境 (与上面节点服务器环境一致，如采用阿里云ECS可克隆其他服务器配置好的镜像作为自定义镜像)，模拟新增org3组织，新增两个节点hosts 映射如下：
+
+  172.31.1.101 peer0.org3.example.com
+  172.31.1.102 peer1.org3.example.com
+
+  2.在第一节点(172.31.1.89)服务器上，重新生成证书文件,
+  #进入/opt/soft目录，存在crypto-config.yaml、configtx.yaml原先配置文件
+  #cd /opt/soft 
+  # 拷贝 crypto-config.yaml 新建一个证书配置文件，命名为crypto-config-org3.yaml，并修改为如下：
+
+# Copyright IBM Corp. All Rights Reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+PeerOrgs:
+  # ---------------------------------------------------------------------------
+  # Org3
+  # ---------------------------------------------------------------------------
+  - Name: Org3
+    Domain: org3.example.com
+    EnableNodeOUs: true
+    CA:
+        Country: CN
+        Province: GuangDong
+        Locality: ShenZhen
+    # ---------------------------------------------------------------------------
+    # "Specs"
+    # ---------------------------------------------------------------------------
+    # Uncomment this section to enable the explicit definition of hosts in your
+    # configuration.  Most users will want to use Template, below
+    #
+    # Specs is an array of Spec entries.  Each Spec entry consists of two fields:
+    #   - Hostname:   (Required) The desired hostname, sans the domain.
+    #   - CommonName: (Optional) Specifies the template or explicit override for
+    #                 the CN.  By default, this is the template:
+    #
+    #                              "{{.Hostname}}.{{.Domain}}"
+    #
+    #                 which obtains its values from the Spec.Hostname and
+    #                 Org.Domain, respectively.
+    # ---------------------------------------------------------------------------
+    # Specs:
+    #   - Hostname: foo # implicitly "foo.org1.example.com"
+    #     CommonName: foo27.org5.example.com # overrides Hostname-based FQDN set above
+    #   - Hostname: bar
+    #   - Hostname: baz
+    # ---------------------------------------------------------------------------
+    # "Template"
+    # ---------------------------------------------------------------------------
+    # Allows for the definition of 1 or more hosts that are created sequentially
+    # from a template. By default, this looks like "peer%d" from 0 to Count-1.
+    # You may override the number of nodes (Count), the starting index (Start)
+    # or the template used to construct the name (Hostname).
+    #
+    # Note: Template and Specs are not mutually exclusive.  You may define both
+    # sections and the aggregate nodes will be created for you.  Take care with
+    # name collisions
+    # ---------------------------------------------------------------------------
+    Template:
+      Count: 2
+      # Start: 5
+      # Hostname: {{.Prefix}}{{.Index}} # default
+    # ---------------------------------------------------------------------------
+    # "Users"
+    # ---------------------------------------------------------------------------
+    # Count: The number of user accounts _in addition_ to Admin
+    # ---------------------------------------------------------------------------
+    Users:
+      Count: 1
+
+
+  ##获取新增组织证书
+  [root@xxxx soft]#cryptogen generate --config=./crypto-config-org3.yaml
+  org3.example.com
+
+  ##在configtx.yaml配置文件中新增创建通道的一些组织信息，新增组织在Organizations段中写明，最后只增加了一个Org3
+
+    - &Org3
+        # DefaultOrg defines the organization which is used in the sampleconfig
+        # of the fabric.git development environment
+        Name: Org3MSP
+        # ID to load the MSP definition as
+        ID: Org3MSP
+        MSPDir: crypto-config/peerOrganizations/org3.example.com/msp
+        AnchorPeers:
+            # AnchorPeers defines the location of peers which can be used
+            # for cross org gossip communication.  Note, this value is only
+            # encoded in the genesis block in the Application section context
+            - Host: peer0.org3.example.com
+              Port: 7051
+
+#######以下是创建新通道部分,本示例不示范################
+对于新增通道，通道文件创建依赖于profiles，根据自己需要添加不同组织
+
+Profiles:
+    TwoOrgsOrdererGenesis:
+        Capabilities:
+            <<: *ChannelCapabilities
+        Orderer:
+            <<: *OrdererDefaults
+            Organizations:
+                - *OrdererOrg
+            Capabilities:
+                <<: *OrdererCapabilities
+        Consortiums:
+            SampleConsortium:
+                Organizations:
+                    - *Org1
+                    - *Org2
+    TwoOrgsChannel:
+        Consortium: SampleConsortium
+        Application:
+            <<: *ApplicationDefaults
+            Organizations:
+                - *Org1
+                - *Org2
+            Capabilities:
+                <<: *ApplicationCapabilities
+    NewOrgsChannel:
+        Consortium: SampleConsortium
+        Application:
+            <<: *ApplicationDefaults
+            Organizations:
+                - *Org1
+                - *Org2
+                - *Org3
+            Capabilities:
+                <<: *ApplicationCapabilities
+    OneOrgsChannel:
+        Consortium: SampleConsortium
+        Application:
+            <<: *ApplicationDefaults
+            Organizations:
+                - *Org3
+            Capabilities:
+                <<: *ApplicationCapabilities
+
+  ##获取通道更新增量包 
+  ##根据新增组织获取组织信息，注意Org3Msp必须与你在configtx.yaml中新增组织名称一致 
+  #configtxgen -printOrg Org3MSP -profile ./configtx.yaml > channel-artifacts/org3.json
+  输出：
+  2019-08-28 17:47:50.947 CST [common.tools.configtxgen] main -> INFO 001 Loading configuration
+  2019-08-28 17:47:50.958 CST [common.tools.configtxgen.localconfig] completeInitialization -> INFO 002 orderer type: kafka
+  2019-08-28 17:47:50.958 CST [common.tools.configtxgen.localconfig] LoadTopLevel -> INFO 003 Loaded configuration: /opt/soft/configtx.yaml
+  [root@xxx channel-artifacts]# ll
+  -rw-r--r-- 1 root root   346 Aug 25 02:26 channel.tx
+  -rw-r--r-- 1 root root 12906 Aug 25 02:25 genesis.block
+  -rw-r--r-- 1 root root   284 Aug 25 02:28 Org1MSPanchors.tx
+  -rw-r--r-- 1 root root   284 Aug 25 02:28 Org2MSPanchors.tx
+  -rw-r--r-- 1 root root  8484 Aug 28 17:47 org3.json
+
+
+  3.进入cli容器，拉取通道二进制文件并且转换为json格式
+  #docker exec -it cli bash
+
+  #认证未开启
+  如tls是关闭的，执行
+  #peer channel fetch config mychannel.pb -o orderer0.example.com:7050 -c mychannel
+
+  #configtxlator proto_decode --input mychannel.pb --type common.Block | jq .data.data[0].payload.data.config > mychannel.json
+
+  /****************************
+  #认证开启
+  这里验证开启tls，则执行
+
+  #peer channel fetch config mychannel.pb -o orderer0.example.com:7050 -c mychannel --tls $CORE_PEER_TLS_ENABLED  --cafile  /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer0.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+
+  #configtxlator proto_decode --input mychannel.pb --type common.Block | jq .data.data[0].payload.data.config > mychannel.json
+  *************************/
+
+  #将之前获取的新增组织信息加入到通道信息json文件
+  #jq -s '.[0] * {"channel_group":{"groups":{"Application":{"groups": {"Org3MSP":.[1]}}}}}' mychannel.json ./channel-artifacts/org3.json > mychannel_config.json
+  输出：
+  root@ae3f95d0f32d:/opt/gopath/src/github.com/hyperledger/fabric/peer# ll
+  .............
+  drwxr-xr-x  2 root root  4096 Aug 25 02:06 mocks/
+  -rw-r--r--  1 root root 15874 Aug 25 16:28 mychannel.block
+  -rw-r--r--  1 root root 35653 Aug 28 18:09 mychannel.json
+  -rw-r--r--  1 root root 16869 Aug 28 18:07 mychannel.pb
+  -rw-r--r--  1 root root 46704 Aug 28 18:24 mychannel_config.json
+
+  #把更新前后的文件打包成二进制文件
+  #configtxlator proto_encode --input mychannel.json --type common.Config > original_mychannel.pb
+  #configtxlator proto_encode --input mychannel_config.json --type common.Config > modified_mychannel.pb
+  输出：
+  root@ae3f95d0f32d:/opt/gopath/src/github.com/hyperledger/fabric/peer# ll
+  ..............
+  drwxr-xr-x  2 root root  4096 Aug 25 02:06 mocks/
+  -rw-r--r--  1 root root 17369 Aug 28 18:26 modified_mychannel.pb
+  -rw-r--r--  1 root root 15874 Aug 25 16:28 mychannel.block
+  -rw-r--r--  1 root root 35653 Aug 28 18:09 mychannel.json
+  -rw-r--r--  1 root root 16869 Aug 28 18:07 mychannel.pb
+  -rw-r--r--  1 root root 46704 Aug 28 18:24 mychannel_config.json
+  drwxr-xr-x  3 root root  4096 Aug 25 02:06 node/
+  -rw-r--r--  1 root root 12853 Aug 28 18:26 original_mychannel.pb
+
+
+  #获取增量包并且补全，转换成二进制文件
+
+  #configtxlator compute_update --channel_id mychannel --original original_mychannel.pb --updated modified_mychannel.pb > mychannel_update.pb
+  #configtxlator proto_decode --input mychannel_update.pb  --type common.ConfigUpdate > mychannel_update.json
+  #echo '{"payload":{"header":{"channel_header":{"channel_id":"mychannel", "type":2}},"data":{"config_update":'$(cat mychannel_update.json)'}}}' | jq . > mychannel_update_envelope.json
+  #configtxlator proto_encode --input mychannel_update_envelope.json --type common.Envelope > mychannel_update_Org_envelope.pb
+  输出：
+  root@ae3f95d0f32d:/opt/gopath/src/github.com/hyperledger/fabric/peer# ll
+  ..............
+  -rw-r--r--  1 root root  1561 Aug 25 02:06 main_test.go
+  drwxr-xr-x  2 root root  4096 Aug 25 02:06 mocks/
+  -rw-r--r--  1 root root 17369 Aug 28 18:26 modified_mychannel.pb
+  -rw-r--r--  1 root root 15874 Aug 25 16:28 mychannel.block
+  -rw-r--r--  1 root root 35653 Aug 28 18:09 mychannel.json
+  -rw-r--r--  1 root root 16869 Aug 28 18:07 mychannel.pb
+  -rw-r--r--  1 root root 46704 Aug 28 18:24 mychannel_config.json
+  -rw-r--r--  1 root root 11149 Aug 28 18:28 mychannel_update.json
+  -rw-r--r--  1 root root  4751 Aug 28 18:28 mychannel_update.pb
+  -rw-r--r--  1 root root  4777 Aug 28 18:29 mychannel_update_Org_envelope.pb
+  -rw-r--r--  1 root root 15177 Aug 28 18:28 mychannel_update_envelope.json
+  drwxr-xr-x  3 root root  4096 Aug 25 02:06 node/
+  -rw-r--r--  1 root root 12853 Aug 28 18:26 original_mychannel.pb
+
+
+  4.原有组织对新加组织进行签名已获取认可，必须使用Org1MSP、Org2MSP admin用户
+
+  export CORE_PEER_LOCALMSPID="Org1MSP"
+  export CORE_PEER_ADDRESS=peer0.org1.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+
+
+  #peer channel signconfigtx -f mychannel_update_Org_envelope.pb
+  输出：
+  2019-08-28 18:52:07.273 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 18:52:07.277 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 18:52:07.277 CST [channelCmd] InitCmdFactory -> INFO 003 Endorser and orderer connections initialized
+
+
+  export CORE_PEER_LOCALMSPID="Org2MSP"
+  export CORE_PEER_ADDRESS=peer0.org2.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+
+  #peer channel signconfigtx -f mychannel_update_Org_envelope.pb
+  输出：
+  2019-08-28 18:53:15.765 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 18:53:15.770 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 18:53:15.770 CST [channelCmd] InitCmdFactory -> INFO 003 Endorser and orderer connections initialized
+
+
+  5.获取签名之后通知orderer更新通道信息
+
+  #未开启认证
+  #peer channel update -f mychannel_update_Org_envelope.pb -c mychannel -o orderer0.example.com:7050
+
+  报错：
+  2019-08-28 18:59:52.082 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 18:59:52.086 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  Error: failed to create deliver client: orderer client failed to connect to orderer0.exeample.com:7050: failed to create new connection: context deadline exceeded
+
+  解决方案：发现写错了orderer0.exeample.com:7050，其实是orderer0.example.com:7050
+
+  修正后输出：
+  2019-08-28 19:17:33.604 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 19:17:33.608 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 19:17:33.609 CST [channelCmd] InitCmdFactory -> INFO 003 Endorser and orderer connections initialized
+  2019-08-28 19:17:33.747 CST [channelCmd] update -> INFO 004 Successfully submitted channel update
+
+
+  /**************************
+  #开启认证
+  peer channel update -f mychannel_update_Org_envelope.pb -c mychannel -o orderer0.example.com:7050 --tls $CORE_PEER_TLS_ENABLED  --cafile  /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer0.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+  ********************************/
+
+
+  6.配置org3的yaml文件，并上传172.31.1.101、172.31.1.102服务器，启动服务。
+  #172.31.1.101 --->peer0.org3.example.com----->docker-compose-peer.yaml
+  #新增172.31.1.101节点，docker-compose-peer.yaml文件配置如下：
+
+version: '2'
+ 
+services:
+  couchdb4:
+    container_name: couchdb4
+    image: hyperledger/fabric-couchdb
+    environment:
+      - COUCHDB_USER=
+      - COUCHDB_PASSWORD=
+    ports:
+      - "5984:5984"
+    volumes:
+      # 数据持久化，用于存储链码值
+      - /mnt/data/couchdb4/data:/opt/couchdb/data
+
+  peer0.org3.example.com:
+    container_name: peer0.org3.example.com
+    hostname: peer0.org3.example.com
+    image: hyperledger/fabric-peer
+    environment:
+      - CORE_LEDGER_STATE_STATEDATABASE=CouchDB
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_COUCHDBADDRESS=couchdb4:5984    
+      - CORE_PEER_ID=peer0.org3.example.com
+      - CORE_PEER_NETWORKID=soft
+      - CORE_PEER_ADDRESS=peer0.org3.example.com:7051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer0.org3.example.com:7051
+      - CORE_PEER_LOCALMSPID=Org3MSP
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft
+      - CORE_LOGGING_LEVEL=DEBUG
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft_default
+      - CORE_PEER_GOSSIP_SKIPHANDSHAKE=true
+      - CORE_PEER_GOSSIP_USELEADERELECTION=true
+      - CORE_PEER_GOSSIP_ORGLEADER=false
+      - CORE_PEER_PROFILE_ENABLED=false
+      - CORE_CHAINCODE_EXECUTETIMEOUT=1000s
+      - CORE_CHAINCODE_DEPLOYTIMEOUT=1000s
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    command: peer node start
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro     
+      - /var/run/:/host/var/run/
+      - /var/hyperledger/peer_data/:/var/hyperledger/production/
+      - ./crypto-config/peerOrganizations/org3.example.com/peers/peer0.org3.example.com/msp:/etc/hyperledger/fabric/msp
+      - ./crypto-config/peerOrganizations/org3.example.com/peers/peer0.org3.example.com/tls:/etc/hyperledger/fabric/tls
+    ports:
+      - 7051:7051
+      - 7052:7052
+      - 7053:7053
+    depends_on:
+      - couchdb4
+
+    extra_hosts:
+      - "couchdb4:172.31.1.101"
+      - "orderer0.example.com:172.31.1.89"
+      - "orderer1.example.com:172.31.1.90"
+      - "orderer2.example.com:172.31.1.91"
+
+  #172.31.1.102 --->peer1.org3.example.com----->docker-compose-peer.yaml
+  #新增172.31.1.102节点，docker-compose-peer.yaml文件配置如下：
+
+version: '2'
+ 
+services:
+  couchdb5:
+    container_name: couchdb5
+    image: hyperledger/fabric-couchdb
+    environment:
+      - COUCHDB_USER=
+      - COUCHDB_PASSWORD=
+    ports:
+      - "5984:5984"
+    volumes:
+      # 数据持久化，用于存储链码值
+      - /mnt/data/couchdb5/data:/opt/couchdb/data
+
+  peer1.org3.example.com:
+    container_name: peer1.org3.example.com
+    hostname: peer1.org3.example.com
+    image: hyperledger/fabric-peer
+    environment:
+      - CORE_LEDGER_STATE_STATEDATABASE=CouchDB
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_COUCHDBADDRESS=couchdb5:5984    
+      - CORE_PEER_ID=peer1.org3.example.com
+      - CORE_PEER_NETWORKID=soft
+      - CORE_PEER_ADDRESS=peer1.org3.example.com:7051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer1.org3.example.com:7051
+      - CORE_PEER_LOCALMSPID=Org3MSP
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft
+      - CORE_LOGGING_LEVEL=DEBUG
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=soft_default
+      - CORE_PEER_GOSSIP_SKIPHANDSHAKE=true
+      - CORE_PEER_GOSSIP_USELEADERELECTION=true
+      - CORE_PEER_GOSSIP_ORGLEADER=false
+      - CORE_PEER_PROFILE_ENABLED=false
+      - CORE_CHAINCODE_EXECUTETIMEOUT=1000s
+      - CORE_CHAINCODE_DEPLOYTIMEOUT=1000s
+      - CORE_PEER_TLS_ENABLED=false
+      - CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+    working_dir: /opt/gopath/src/github.com/hyperledger/fabric/peer
+    command: peer node start
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro     
+      - /var/run/:/host/var/run/
+      - /var/hyperledger/peer_data/:/var/hyperledger/production/
+      - ./crypto-config/peerOrganizations/org3.example.com/peers/peer1.org3.example.com/msp:/etc/hyperledger/fabric/msp
+      - ./crypto-config/peerOrganizations/org3.example.com/peers/peer1.org3.example.com/tls:/etc/hyperledger/fabric/tls
+    ports:
+      - 7051:7051
+      - 7052:7052
+      - 7053:7053
+    depends_on:
+      - couchdb5
+
+    extra_hosts:
+      - "couchdb5:172.31.1.102"
+      - "orderer0.example.com:172.31.1.89"
+      - "orderer1.example.com:172.31.1.90"
+      - "orderer2.example.com:172.31.1.91"
+ 
+    #从 172.31.1.89 节点/opt/soft，拷贝channel-artifacts，crypto-config 目录文件 至172.31.1.101、172.31.1.102服务器，/opt/soft目录下
+  scp -r crypto-config channel-artifacts root@172.31.1.101:/opt/soft
+  scp -r crypto-config channel-artifacts root@172.31.1.102:/opt/soft
+
+  #更新其他所有节点服务器的channel-artifacts，crypto-config，防止peer或orderer发生重启时加载不到最新文件
+  scp -r crypto-config channel-artifacts root@172.31.1.90:/opt/soft
+  scp -r crypto-config channel-artifacts root@172.31.1.91:/opt/soft
+  scp -r crypto-config channel-artifacts root@172.31.1.92:/opt/soft
+
+  #启动
+  #docker-compose -f docker-compose-peer.yaml up -d
+
+  7.修改第一节点(172.31.1.89),/opt/soft目录下对 docker-compose-cli.yaml 文件增加配置修改，并重启cli服务
+  #修改增加peer0.org3.example.com:172.31.1.101、peer1.org3.example.com:172.31.1.102 extra_hosts
+    extra_hosts:
+      - "orderer0.example.com:172.31.1.89"
+      - "orderer1.example.com:172.31.1.90"
+      - "orderer2.example.com:172.31.1.91"
+      - "peer0.org1.example.com:172.31.1.89"
+      - "peer1.org1.example.com:172.31.1.90"
+      - "peer0.org2.example.com:172.31.1.91"
+      - "peer1.org2.example.com:172.31.1.92"
+      - "peer0.org3.example.com:172.31.1.101"
+      - "peer1.org3.example.com:172.31.1.102"
+  #重启构建      
+  #docker-compose -f docker-compose-cli.yaml up -d
+
+
+
+  8.Org3MSP加入通道 ，进入172.31.1.89 cli容器 
+  #切换到org3的节点上环境变量然后执行peer channel join 加入通道
+
+  export CORE_PEER_LOCALMSPID="Org3MSP"
+  export CORE_PEER_ADDRESS=peer0.org3.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org3.example.com/peers/peer0.org3.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org3.example.com/users/Admin@org3.example.com/msp
+
+
+  #peer channel join -b mychannel.block
+  输出：
+  2019-08-28 20:24:13.880 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:24:13.884 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:24:13.885 CST [channelCmd] InitCmdFactory -> INFO 003 Endorser and orderer connections initialized
+  2019-08-28 20:24:14.104 CST [channelCmd] executeJoin -> INFO 004 Successfully submitted proposal to join channel
+
+
+  9.更新链码 (所有peer节点(现有6个节点)上的链码都必须重新安装！！！！！)
+  #在新增org3的所有节点上安装链码，版本号为2.0(注意是所有节点都要)
+
+  #peer0.org3.example.com
+
+  export CORE_PEER_LOCALMSPID="Org3MSP"
+  export CORE_PEER_ADDRESS=peer0.org3.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org3.example.com/peers/peer0.org3.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org3.example.com/users/Admin@org3.example.com/msp
+
+
+  peer chaincode install -n example2 -p github.com/hyperledger/fabric/examples/chaincode/go/example02 -v 2.0   
+  输出：
+  2019-08-28 20:28:33.592 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:28:33.596 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:28:33.600 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-28 20:28:33.600 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+  2019-08-28 20:28:33.903 CST [chaincodeCmd] install -> INFO 005 Installed remotely response:<status:200 payload:"OK" > 
+
+  #peer1.org3.example.com
+
+  export CORE_PEER_LOCALMSPID="Org3MSP"
+  export CORE_PEER_ADDRESS=peer1.org3.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org3.example.com/peers/peer1.org3.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org3.example.com/users/Admin@org3.example.com/msp
+
+  #peer chaincode install -n example2 -p github.com/hyperledger/fabric/examples/chaincode/go/example02 -v 2.0
+  输出：
+  2019-08-28 20:33:16.276 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:33:16.280 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:33:16.284 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-28 20:33:16.284 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+  2019-08-28 20:33:16.565 CST [chaincodeCmd] install -> INFO 005 Installed remotely response:<status:200 payload:"OK" > 
+
+  #切换环境变量到原有的org1和org2上分别所有节点更新链码，版本号必须对应(注意是所有节点都要更新)
+
+  #切换到org1环境变量
+  peer0.org1.example.com
+
+  export CORE_PEER_LOCALMSPID="Org1MSP"
+  export CORE_PEER_ADDRESS=peer0.org1.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+
+  #peer chaincode install -n example2 -p github.com/hyperledger/fabric/examples/chaincode/go/example02 -v 2.0
+  输出：
+  2019-08-28 20:36:58.948 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:36:58.952 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:36:58.955 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-28 20:36:58.955 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+  2019-08-28 20:36:59.228 CST [chaincodeCmd] install -> INFO 005 Installed remotely response:<status:200 payload:"OK" > 
+
+  peer1.org1.example.com
+
+  export CORE_PEER_LOCALMSPID="Org1MSP"
+  export CORE_PEER_ADDRESS=peer1.org1.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer1.org1.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+
+  #peer chaincode install -n example2 -p github.com/hyperledger/fabric/examples/chaincode/go/example02 -v 2.0
+  输出：
+  2019-08-28 20:38:04.091 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:38:04.095 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:38:04.098 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-28 20:38:04.098 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+  2019-08-28 20:38:04.372 CST [chaincodeCmd] install -> INFO 005 Installed remotely response:<status:200 payload:"OK" 
+
+  peer0.org2.example.com
+
+  export CORE_PEER_LOCALMSPID="Org2MSP"
+  export CORE_PEER_ADDRESS=peer0.org2.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+
+  #peer chaincode install -n example2 -p github.com/hyperledger/fabric/examples/chaincode/go/example02 -v 2.0
+  输出：
+  2019-08-28 20:39:35.826 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:39:35.830 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:39:35.834 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-28 20:39:35.834 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+  2019-08-28 20:39:36.110 CST [chaincodeCmd] install -> INFO 005 Installed remotely response:<status:200 payload:"OK" > 
+
+
+  peer1.org2.example.com
+
+  export CORE_PEER_LOCALMSPID="Org2MSP"
+  export CORE_PEER_ADDRESS=peer1.org2.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer1.org2.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+
+  #peer chaincode install -n example2 -p github.com/hyperledger/fabric/examples/chaincode/go/example02 -v 2.0
+  输出：
+  2019-08-28 20:40:35.467 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:40:35.471 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:40:35.475 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-28 20:40:35.475 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+  2019-08-28 20:40:35.747 CST [chaincodeCmd] install -> INFO 005 Installed remotely response:<status:200 payload:"OK" > 
+
+
+
+
+  10.更新背书策略，在原有的两个组织策略上增加新增组织
+  #第一节点(172.31.1.89),进入cli 容器，切换到org1环境变量
+  peer0.org1.example.com
+
+  export CORE_PEER_LOCALMSPID="Org1MSP"
+  export CORE_PEER_ADDRESS=peer0.org1.example.com:7051
+  export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+  export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+
+
+  #认证未开启
+  #peer chaincode upgrade -o orderer0.example.com:7050 -C mychannel -n example2 -v 2.0 -c '{"Args":["init","A","100","B","50"]}' -P "OR ('Org1MSP.peer','Org2MSP.peer','Org3MSP.peer')" 
+
+  # 旧版本的合约, 目前，fabric不支持合约的启动与暂停。要暂停或删除合约，只能到peer上手动删除容器。
+  2019-08-28 20:47:05.750 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:47:05.754 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:47:05.758 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 003 Using default escc
+  2019-08-28 20:47:05.758 CST [chaincodeCmd] checkChaincodeCmdParams -> INFO 004 Using default vscc
+
+  /***********************
+  #认证开启，则执行
+  peer chaincode upgrade -o orderer0.example.com:7050 --tls $CORE_PEER_TLS_ENABLED  --cafile  /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer0.example.com/msp/tlscacerts/tlsca.example.com-cert.pem -C mychannel -n example2 -v 2.0 -c '{"Args":["init","A","100","B","50"]}' -P "OR ('Org1MSP.peer','Org2MSP.peer','Org3MSP.peer')"
+  ************************/
+
+
+  11.测试查询
+  # 这里再查询 A 与 B 的账户
+  # A 账户余额 
+
+  #peer chaincode query -C mychannel -n example2 -c '{"Args":["query","A"]}'
+  输出：
+  2019-08-28 20:49:13.846 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:49:13.850 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  100
+
+  # peer chaincode query -C mychannel -n example2 -c '{"Args":["query","B"]}'
+  输出：
+  2019-08-28 20:49:31.416 CST [main] InitCmd -> WARN 001 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  2019-08-28 20:49:31.420 CST [main] SetOrdererEnv -> WARN 002 CORE_LOGGING_LEVEL is no longer supported, please use the FABRIC_LOGGING_SPEC environment variable
+  50
+
+  12.(非必要)暴露相应排序orderer/peer对外地址，可供外部SDK访问上链
+  orderer0.example.com  7050  112.xxx.xxx.xxx:13150
+  orderer1.example.com  7050  112.xxx.xxx.xxx:13151
+  orderer2.example.com  7050  112.xxx.xxx.xxx:13152
+
+  peer0.org1.example.com  7051   112.xxx.xxx.xxx:13250
+  peer1.org1.example.com  7051   112.xxx.xxx.xxx:13251
+  peer0.org2.example.com  7051   112.xxx.xxx.xxx:13252
+  peer1.org2.example.com  7051   112.xxx.xxx.xxx:13253
+
+
+参考链接：
+https://jicki.me/fabric/2018/08/07/hyperledger-fabric-1.2/
+https://www.jianshu.com/p/3185d1e57259
+https://blog.csdn.net/qq_26288303/article/details/82500190
+https://www.cnblogs.com/zjlong/p/11226172.html
